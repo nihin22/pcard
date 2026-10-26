@@ -33,11 +33,12 @@ def secret(name, default=""):
 
 
 API_KEY = secret("GEMINI_API_KEY")
-MODEL = secret("GEMINI_MODEL", "gemini-2.5-flash")
+_fallbacks = [m.strip() for m in str(secret("GEMINI_FALLBACK_MODELS", "")).split(",") if m.strip()]
+MODELS = list(dict.fromkeys([secret("GEMINI_MODEL", "")] + (_fallbacks or core.DEFAULT_MODELS)))
 
 
 def llm(system, user, max_tokens=2048):
-    return core.call_gemini(system, user, API_KEY, MODEL, max_tokens)
+    return core.call_gemini(system, user, API_KEY, MODELS, max_tokens)
 
 
 def to_df(columns, rows):

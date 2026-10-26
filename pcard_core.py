@@ -219,10 +219,13 @@ def validate_sql(sql):
     return s
 
 
-def call_gemini(system, user, api_key, model="gemini-2.5-flash", max_tokens=2048):
-    """Call Google Gemini. The key is passed in at run time (from Streamlit secrets) and never stored in code."""
-    if not api_key:
-        raise RuntimeError("The AI feature is not configured: add GEMINI_API_KEY to the app's Secrets.")
+# Models tried in order. If one is overloaded/unavailable, the next one is used.
+# Can be overridden with GEMINI_MODEL / GEMINI_FALLBACK_MODELS in Streamlit secrets.
+DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+RETRY_STATUS = {404, 429, 500, 503, 504}   # not found / quota / overloaded / server errors
+
+
+def _gemini_once(system, user, api_key, model, max_tokens):
     resp = requests.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
@@ -236,9 +239,36 @@ def call_gemini(system, user, api_key, model="gemini-2.5-flash", max_tokens=2048
             msg = resp.json().get("error", {}).get("message", "")
         except ValueError:
             msg = ""
-        raise RuntimeError(f"Gemini returned an error ({resp.status_code}). {msg}")
+        return None, resp.status_code, msg
     parts = (resp.json().get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    return "".join(p.get("text", "") for p in parts), 200, ""
+
+
+def call_gemini(system, user, api_key, models=None, max_tokens=2048):
+    """Call Google Gemini, falling back to the next model if one is busy or unavailable.
+    The key is passed in at run time (from Streamlit secrets) and never stored in code."""
+    if not api_key:
+        raise RuntimeError("The AI feature is not configured: add GEMINI_API_KEY to the app's Secrets.")
+    if isinstance(models, str):
+        models = [models]
+    models = [m for m in (models or DEFAULT_MODELS) if m]
+    errors = []
+    for model in models:
+        for attempt in range(2):                     # one quick retry on the same model
+            try:
+                text, status, msg = _gemini_once(system, user, api_key, model, max_tokens)
+            except requests.RequestException as e:
+                text, status, msg = None, 503, str(e)
+            if text is not None:
+                return text
+            if status not in RETRY_STATUS:           # e.g. 400 bad key/request: no point trying others
+                raise RuntimeError(f"Gemini returned an error ({status}). {msg}")
+            if status == 404:                         # model does not exist: go straight to the next
+                break
+            time.sleep(1.5 * (attempt + 1))
+        errors.append(f"{model}: {status}")
+    raise RuntimeError("All Gemini models are busy or unavailable right now (" + ", ".join(errors) +
+                       "). Please try again in a minute.")
 
 
 def _parse_json(text):
